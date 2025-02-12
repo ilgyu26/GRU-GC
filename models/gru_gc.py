@@ -24,85 +24,68 @@ class GRU_GC(object):
 
         # nue options
         self.theta = 0.09
+
+        # GPU
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     def gru_gc(self, dataset):
-        data_loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
-        x, y = next(iter(data_loader))
-
-        granger_matrix = np.zeros([self.num_channel, self.num_channel])
-        var_denominator = np.zeros([1, self.num_channel])
+        x, y = dataset.tensors
+        granger_matrix = np.zeros((self.num_channel, self.num_channel))
+        var_denominator = np.zeros(self.num_channel)
 
         for k in range(self.num_channel):
-            tmp_y = np.reshape(y[:, k], [y.shape[0], 1])
+            tmp_y = y[:, k].unsqueeze(1)
+            tmp_y = tmp_y.to(self.device)
             channel_set = list(range(self.num_channel))
             input_set = []
-            last_error = 0
+            last_error = float("inf")
 
-            for i in range(self.num_channel):
-                min_error = 1e7
-                min_idx = 0
+            for _ in range(self.num_channel):
+                min_error, min_idx = float("inf"), None
                 for x_idx in channel_set:
-                    candidate_set = copy.copy(input_set)
-                    candidate_set.append(x_idx)
+                    candidate_set = input_set + [x_idx]
                     tmp_x = x[:, :, candidate_set]
+                    tmp_x = tmp_x.to(self.device)
+                    train_loader = DataLoader(TensorDataset(tmp_x, tmp_y), batch_size=self.batch_size, shuffle=True)
 
                     print(f"Training a model to predict channel {k} using channels {candidate_set}...")
 
-                    tmp_dataset = TensorDataset(tmp_x, tmp_y)
-                    train_loader = DataLoader(tmp_dataset, batch_size=self.batch_size, shuffle=True)
+                    model = CustomGRU(len(candidate_set), self.hidden_size, self.output_size, self.num_layers, self.dropout).to(self.device)
+                    error = train_model(model, train_loader, self.learning_rate, self.weight_decay, self.num_epochs, self.device)
 
-                    gru = CustomGRU(len(candidate_set), self.hidden_size, self.output_size, self.num_layers, self.dropout)
-                    tmp_error = train_model(gru, train_loader, self.learning_rate, self.weight_decay, self.num_epochs)
-                    if tmp_error < min_error:
-                        min_error = tmp_error
-                        min_idx = x_idx
-                if i != 0 and (np.abs(last_error - min_error) / last_error < self.theta or last_error < min_error):
+                    if error < min_error:
+                        min_error, min_idx = error, x_idx
+                
+                if len(input_set) > 0 and (abs(last_error - min_error) / last_error < self.theta or last_error < min_error):
                     break
+
                 input_set.append(min_idx)
                 channel_set.remove(min_idx)
                 last_error = min_error
-                
-            gru.eval()
 
+            print(f"The model predicting the channel {k} uses {input_set}")
+
+            tmp_x = x[:, :, input_set]
+            tmp_x = tmp_x.to(self.device)
+            train_loader = DataLoader(TensorDataset(tmp_x, tmp_y), batch_size=self.batch_size, shuffle=True)
+            model = CustomGRU(len(input_set), self.hidden_size, self.output_size, self.num_layers, self.dropout).to(self.device)
+            train_model(model, train_loader, self.learning_rate, self.weight_decay, self.num_epochs, self.device)
+                   
+            model.eval()
             with torch.no_grad():
-                pred = gru(x[:, :, input_set].clone().detach()).detach().cpu().numpy()
-                target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
-                var_denominator[0][k] = np.var(pred - target, axis=0)
-
-            for j in range(self.num_channel):
-                with torch.no_grad(): 
+                var_denominator[k] = torch.var(model(tmp_x) - tmp_y, unbiased=False).item()
+                for j in range(self.num_channel):
                     if j not in input_set:
-                        granger_matrix[j][k] = var_denominator[0][k]
+                        granger_matrix[j, k] = var_denominator[k]
                     elif len(input_set) == 1:
-                        pred = gru(x[:, :, k].unsqueeze(-1).clone().detach()).detach().cpu().numpy()
-                        target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
-                        granger_matrix[j][k] = np.var(pred - target, axis=0)
+                        tmp_x = x[:, :, k].unsqueeze(-1)
+                        granger_matrix[j, k] = torch.var(model(tmp_x) - tmp_y, unbiased=False).item()
                     else:
-                        tmp_x = x[:, :, input_set].clone().detach()
-                        tmp_x[..., input_set.index(j)] = 0
-                        pred = gru(tmp_x).detach().cpu().numpy()
-                        target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
-                        granger_matrix[j][k] = np.var(pred - target, axis=0)
-            '''            
-            gru.eval()
-            var_denominator[0][k] = np.var(gru(x[:, :, input_set]) - tmp_y, axis = 0)
-            for j in range(self.num_channel):
-                if j not in input_set:
-                    granger_matrix[j][k] = var_denominator[0][k]
-                elif len(input_set) == 1:
-                    tmp_x = x[:, :, k]
-                    tmp_x = tmp_x[:, :, np.newaxis]
-                    granger_matrix[j][k] = np.var(gru(tmp_x) - tmp_y, axis=0)
-                else:
-                    tmp_x = x[:, :, input_set]
-                    channel_del_idx = input_set.index(j)
-                    tmp_x[:, :, channel_del_idx] = 0
-                    granger_matrix[j][k] = np.var(gru(tmp_x) - tmp_y, axis=0)
-            '''
-        granger_matrix = granger_matrix / var_denominator
-        for i in range(self.num_channel):
-            granger_matrix[i][i] = 1
-        granger_matrix[granger_matrix < 1] = 1
-        granger_matrix = np.log(granger_matrix)
+                        tmp_x[:, :, input_set.index(j)] = 0
+                        granger_matrix[j, k] = torch.var(model(tmp_x) - tmp_y, unbiased=False).item()
+        
+        granger_matrix /= var_denominator
+        np.fill_diagonal(granger_matrix, 1)
+        granger_matrix = np.log(np.maximum(granger_matrix, 1))
 
         return granger_matrix
