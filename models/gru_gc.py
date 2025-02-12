@@ -26,7 +26,8 @@ class GRU_GC(object):
         self.theta = 0.09
     
     def gru_gc(self, dataset):
-        x, y = dataset
+        data_loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+        x, y = next(iter(data_loader))
 
         granger_matrix = np.zeros([self.num_channel, self.num_channel])
         var_denominator = np.zeros([1, self.num_channel])
@@ -45,10 +46,12 @@ class GRU_GC(object):
                     candidate_set.append(x_idx)
                     tmp_x = x[:, :, candidate_set]
 
+                    print(f"Training a model to predict channel {k} using channels {candidate_set}...")
+
                     tmp_dataset = TensorDataset(tmp_x, tmp_y)
                     train_loader = DataLoader(tmp_dataset, batch_size=self.batch_size, shuffle=True)
 
-                    gru = CustomGRU(self.num_channel, self.hidden_size, self.output_size, self.num_layers, self.dropout)
+                    gru = CustomGRU(len(candidate_set), self.hidden_size, self.output_size, self.num_layers, self.dropout)
                     tmp_error = train_model(gru, train_loader, self.learning_rate, self.weight_decay, self.num_epochs)
                     if tmp_error < min_error:
                         min_error = tmp_error
@@ -62,8 +65,8 @@ class GRU_GC(object):
             gru.eval()
 
             with torch.no_grad():
-                pred = gru(torch.tensor(x[:, :, input_set], dtype=torch.float32)).detach().cpu().numpy()
-                target = torch.tensor(tmp_y, dtype=torch.float32).detach().cpu().numpy()
+                pred = gru(x[:, :, input_set].clone().detach()).detach().cpu().numpy()
+                target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
                 var_denominator[0][k] = np.var(pred - target, axis=0)
 
             for j in range(self.num_channel):
@@ -71,16 +74,14 @@ class GRU_GC(object):
                     if j not in input_set:
                         granger_matrix[j][k] = var_denominator[0][k]
                     elif len(input_set) == 1:
-                        tmp_x = torch.tensor(x[:, :, k][:, :, np.newaxis], dtype=torch.float32)
-                        pred = gru(tmp_x).detach().cpu().numpy()
-                        target = torch.tensor(tmp_y, dtype=torch.float32).detach().cpu().numpy()
+                        pred = gru(x[:, :, k].unsqueeze(-1).clone().detach()).detach().cpu().numpy()
+                        target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
                         granger_matrix[j][k] = np.var(pred - target, axis=0)
                     else:
-                        tmp_x = torch.tensor(x[:, :, input_set], dtype=torch.float32)
-                        channel_del_idx = input_set.index(j)
-                        tmp_x[:, :, channel_del_idx] = 0 
+                        tmp_x = x[:, :, input_set].clone().detach()
+                        tmp_x[..., input_set.index(j)] = 0
                         pred = gru(tmp_x).detach().cpu().numpy()
-                        target = torch.tensor(tmp_y, dtype=torch.float32).detach().cpu().numpy()
+                        target = tmp_y.detach().cpu().numpy() if isinstance(tmp_y, torch.Tensor) else np.array(tmp_y)
                         granger_matrix[j][k] = np.var(pred - target, axis=0)
             '''            
             gru.eval()
