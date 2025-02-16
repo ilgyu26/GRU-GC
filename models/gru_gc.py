@@ -1,5 +1,4 @@
 import numpy as np
-import copy
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -10,7 +9,7 @@ class GRU_GC(object):
     def __init__(self):
         # model options
         self.num_channel = 5
-        self.hidden_size = 32
+        self.hidden_size = 30
         self.output_size = 1
         self.num_layers = 1
         self.dropout = 0.5
@@ -65,8 +64,7 @@ class GRU_GC(object):
 
             print(f"The model predicting the channel {k} uses {input_set}")
 
-            tmp_x = x[:, :, input_set]
-            tmp_x = tmp_x.to(self.device)
+            tmp_x = x[:, :, input_set].to(self.device)
             train_loader = DataLoader(TensorDataset(tmp_x, tmp_y), batch_size=self.batch_size, shuffle=True)
             model = CustomGRU(len(input_set), self.hidden_size, self.output_size, self.num_layers, self.dropout).to(self.device)
             train_model(model, train_loader, self.learning_rate, self.weight_decay, self.num_epochs, self.device)
@@ -78,14 +76,18 @@ class GRU_GC(object):
                     if j not in input_set:
                         granger_matrix[j, k] = var_denominator[k]
                     elif len(input_set) == 1:
-                        tmp_x = x[:, :, k].unsqueeze(-1)
+                        tmp_x = x[:, :, k].unsqueeze(-1).to(self.device)
                         granger_matrix[j, k] = torch.var(model(tmp_x) - tmp_y, unbiased=False).item()
                     else:
                         tmp_x[:, :, input_set.index(j)] = 0
                         granger_matrix[j, k] = torch.var(model(tmp_x) - tmp_y, unbiased=False).item()
-        
-        granger_matrix /= var_denominator
-        np.fill_diagonal(granger_matrix, 1)
-        granger_matrix = np.log(np.maximum(granger_matrix, 1))
+
+                granger_matrix[:, k] /= var_denominator[k]
+                granger_matrix[k, k] = 1
+                granger_matrix[:, k] = np.log(np.maximum(granger_matrix[:, k], 1))
+
+                print(f"Updated Granger matrix column {k}: \n{granger_matrix[:, k]}\n")
+
+        print(f"Granger Matrix: \n{granger_matrix}")
 
         return granger_matrix
